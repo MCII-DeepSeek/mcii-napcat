@@ -1,0 +1,44 @@
+name: Archive original NapCat release
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: archive-v4.18.42
+  cancel-in-progress: false
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Copy and verify unmodified release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/contents/archive/v4.18.42.json" --jq .content | base64 -d > manifest.json
+          gh api "repos/$GITHUB_REPOSITORY/contents/LICENSE" --jq .content | base64 -d > LICENSE
+          python3 - <<'PY'
+          import json, hashlib, pathlib, urllib.request, concurrent.futures
+          manifest=json.load(open('manifest.json'))
+          def copy(asset):
+              path=pathlib.Path(asset['name'])
+              with urllib.request.urlopen(asset['url'],timeout=120) as response, path.open('wb') as output:
+                  digest=hashlib.sha256(); size=0
+                  while chunk:=response.read(1024*1024):
+                      size+=len(chunk);digest.update(chunk);output.write(chunk)
+              if size!=asset['bytes'] or digest.hexdigest()!=asset['sha256']:
+                  raise RuntimeError('Checksum mismatch: '+path.name)
+              print('Verified '+path.name,flush=True)
+          with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+              list(executor.map(copy,manifest['assets']))
+          pathlib.Path('SHA256SUMS').write_text(''.join(a['sha256']+'  '+a['name']+'\n' for a in manifest['assets']))
+          PY
+          if ! gh release view v4.18.42 -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create v4.18.42 -R "$GITHUB_REPOSITORY" --draft --verify-tag --title "NapCat v4.18.42 · 原始存档" --notes "原样存档自 XingYunStar/NapCatQQ v4.18.42；原项目 NapNeko/NapCatQQ。源码、版权与 Limited Redistribution License 保留。发布包未修改，SHA256SUMS 和 manifest.json 记录原始 SHA-256。非商业使用；本仓库不代表原作者，不保证未来维护。"
+          fi
+          for file in napcat-docker-v4.18.42-*.tar* NapCat.*.zip manifest.json SHA256SUMS LICENSE; do
+            gh release upload v4.18.42 "$file" -R "$GITHUB_REPOSITORY" --clobber
+          done
+          gh release edit v4.18.42 -R "$GITHUB_REPOSITORY" --draft=false --latest
